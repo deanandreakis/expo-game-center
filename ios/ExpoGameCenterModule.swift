@@ -14,6 +14,10 @@ public class ExpoGameCenterModule: Module {
   private let gameCenterDelegate = GameCenterDelegate()
   private var authenticationPromise: Promise?
   private var hasSetupAuthHandler = false
+
+  // Cache authentication state to handle race condition
+  private var cachedAuthenticationState: Bool?
+  private var authenticationHandlerReady = false
   
   // Required for module registration
   public required init(appContext: AppContext) {
@@ -43,25 +47,30 @@ public class ExpoGameCenterModule: Module {
 
     AsyncFunction("authenticateLocalPlayer") { (promise: Promise) in
       print("[ExpoGameCenter] authenticateLocalPlayer called")
-      
+
       // If already authenticated, resolve immediately
       if GKLocalPlayer.local.isAuthenticated {
         print("[ExpoGameCenter] Already authenticated, returning true")
         promise.resolve(true)
         return
       }
-      
+
+      // FIX: Check if handler already fired and cached the result
+      if self.authenticationHandlerReady, let cachedState = self.cachedAuthenticationState {
+        print("[ExpoGameCenter] Using cached authentication state: \(cachedState)")
+        promise.resolve(cachedState)
+        return
+      }
+
       // Store the promise to resolve later
       self.authenticationPromise = promise
-      
-      // Trigger authentication by accessing a GameCenter feature
-      // This will cause the auth handler to be called if not authenticated
-      _ = GKLocalPlayer.local.isAuthenticated
-      
+      print("[ExpoGameCenter] Waiting for authentication handler to fire...")
+
       // Set a timeout for authentication
       DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
         if let pendingPromise = self.authenticationPromise {
           self.authenticationPromise = nil
+          print("[ExpoGameCenter] Authentication timed out after 10 seconds")
           pendingPromise.reject("AUTHENTICATION_TIMEOUT", "Authentication timed out")
         }
       }
@@ -264,16 +273,21 @@ public class ExpoGameCenterModule: Module {
     
     GKLocalPlayer.local.authenticateHandler = { [weak self] viewController, error in
       guard let self = self else { return }
-      
+
       if let error = error {
         print("[ExpoGameCenter] Authentication error: \(error.localizedDescription)")
+
+        // FIX: Cache the error state even if no promise is waiting
+        self.cachedAuthenticationState = false
+        self.authenticationHandlerReady = true
+
         if let promise = self.authenticationPromise {
           self.authenticationPromise = nil
           promise.reject("AUTHENTICATION_ERROR", error.localizedDescription)
         }
         return
       }
-      
+
       if let viewController = viewController {
         print("[ExpoGameCenter] Presenting authentication view controller")
         DispatchQueue.main.async {
@@ -284,18 +298,22 @@ public class ExpoGameCenterModule: Module {
             }
             return
           }
-          
+
           rootViewController.present(viewController, animated: true) {
             print("[ExpoGameCenter] Authentication view controller presented")
           }
         }
         return
       }
-      
+
       // Authentication completed (success or user cancelled)
       let isAuthenticated = GKLocalPlayer.local.isAuthenticated
       print("[ExpoGameCenter] Authentication completed, result: \(isAuthenticated)")
-      
+
+      // FIX: Cache the authentication state even if no promise is waiting
+      self.cachedAuthenticationState = isAuthenticated
+      self.authenticationHandlerReady = true
+
       if let promise = self.authenticationPromise {
         self.authenticationPromise = nil
         promise.resolve(isAuthenticated)
