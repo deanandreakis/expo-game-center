@@ -48,21 +48,29 @@ public class ExpoGameCenterModule: Module {
     AsyncFunction("authenticateLocalPlayer") { (promise: Promise) in
       print("[ExpoGameCenter] authenticateLocalPlayer called")
 
-      // If already authenticated, resolve immediately
-      if GKLocalPlayer.local.isAuthenticated {
-        print("[ExpoGameCenter] Already authenticated, returning true")
+      // CRITICAL: Always check REAL authentication state first
+      // The cached state might be stale - player could have logged in since handler fired
+      let currentAuthState = GKLocalPlayer.local.isAuthenticated
+      print("[ExpoGameCenter] Current authentication state: \(currentAuthState)")
+
+      if currentAuthState {
+        print("[ExpoGameCenter] Player is authenticated")
+        // Update cache to reflect current state
+        self.cachedAuthenticationState = true
+        self.authenticationHandlerReady = true
         promise.resolve(true)
         return
       }
 
-      // FIX: Check if handler already fired and cached the result
-      if self.authenticationHandlerReady, let cachedState = self.cachedAuthenticationState {
-        print("[ExpoGameCenter] Using cached authentication state: \(cachedState)")
-        promise.resolve(cachedState)
+      // Not currently authenticated - check if handler already fired
+      if self.authenticationHandlerReady {
+        print("[ExpoGameCenter] Handler already fired, player not authenticated")
+        // Handler fired but player still not authenticated
+        promise.resolve(false)
         return
       }
 
-      // Store the promise to resolve later
+      // Handler hasn't fired yet - wait for it
       self.authenticationPromise = promise
       print("[ExpoGameCenter] Waiting for authentication handler to fire...")
 
@@ -71,7 +79,10 @@ public class ExpoGameCenterModule: Module {
         if let pendingPromise = self.authenticationPromise {
           self.authenticationPromise = nil
           print("[ExpoGameCenter] Authentication timed out after 10 seconds")
-          pendingPromise.reject("AUTHENTICATION_TIMEOUT", "Authentication timed out")
+          // Check one more time before timing out
+          let finalState = GKLocalPlayer.local.isAuthenticated
+          print("[ExpoGameCenter] Final auth state before timeout: \(finalState)")
+          pendingPromise.resolve(finalState)
         }
       }
     }
