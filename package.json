@@ -49,11 +49,13 @@
   "license": "MIT",
   "files": [
     "build",
+    "src",
     "ios",
     "plugin",
     "expo-module.config.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "tsconfig.json"
   ],
   "dependencies": {
     "@expo/config-plugins": "^7.0.0"
