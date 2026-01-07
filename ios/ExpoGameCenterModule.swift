@@ -294,7 +294,10 @@ public class ExpoGameCenterModule: Module {
 
         if let promise = self.authenticationPromise {
           self.authenticationPromise = nil
-          promise.reject("AUTHENTICATION_ERROR", error.localizedDescription)
+          // CRITICAL: Resolve with false instead of rejecting
+          // This lets the app handle "not authenticated" gracefully
+          print("[ExpoGameCenter] Resolving promise with false due to auth error")
+          promise.resolve(false)
         }
         return
       }
@@ -305,7 +308,8 @@ public class ExpoGameCenterModule: Module {
           guard let rootViewController = self.getRootViewController() else {
             if let promise = self.authenticationPromise {
               self.authenticationPromise = nil
-              promise.reject("PRESENTATION_ERROR", "Could not find root view controller")
+              print("[ExpoGameCenter] Could not find root view controller, resolving with false")
+              promise.resolve(false)
             }
             return
           }
