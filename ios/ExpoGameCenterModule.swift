@@ -18,6 +18,7 @@ public class ExpoGameCenterModule: Module {
   // Cache authentication state to handle race condition
   private var cachedAuthenticationState: Bool?
   private var authenticationHandlerReady = false
+  private var storedAuthenticationViewController: UIViewController?
   
   // Required for module registration
   public required init(appContext: AppContext) {
@@ -65,7 +66,39 @@ public class ExpoGameCenterModule: Module {
       // Not currently authenticated - check if handler already fired
       if self.authenticationHandlerReady {
         print("[ExpoGameCenter] Handler already fired, player not authenticated")
-        // Handler fired but player still not authenticated
+
+        // Check if we have a stored authentication viewController to present
+        if let authViewController = self.storedAuthenticationViewController {
+          print("[ExpoGameCenter] Found stored auth viewController, presenting it now")
+          self.storedAuthenticationViewController = nil  // Clear it
+          self.authenticationPromise = promise  // Store promise to resolve after auth
+
+          DispatchQueue.main.async {
+            guard let rootViewController = self.getRootViewController() else {
+              print("[ExpoGameCenter] No root view controller available")
+              promise.resolve(false)
+              return
+            }
+
+            rootViewController.present(authViewController, animated: true) {
+              print("[ExpoGameCenter] Authentication view controller presented")
+              // The handler will be called again when user completes authentication
+            }
+          }
+
+          // Set timeout for user interaction
+          DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) {
+            if let pendingPromise = self.authenticationPromise {
+              self.authenticationPromise = nil
+              print("[ExpoGameCenter] Authentication UI timed out after 30 seconds")
+              let finalState = GKLocalPlayer.local.isAuthenticated
+              pendingPromise.resolve(finalState)
+            }
+          }
+          return
+        }
+
+        // No viewController to present, player just isn't authenticated
         promise.resolve(false)
         return
       }
@@ -303,20 +336,28 @@ public class ExpoGameCenterModule: Module {
       }
 
       if let viewController = viewController {
-        print("[ExpoGameCenter] Presenting authentication view controller")
-        DispatchQueue.main.async {
-          guard let rootViewController = self.getRootViewController() else {
-            if let promise = self.authenticationPromise {
-              self.authenticationPromise = nil
-              print("[ExpoGameCenter] Could not find root view controller, resolving with false")
-              promise.resolve(false)
-            }
-            return
-          }
+        print("[ExpoGameCenter] Authentication handler provided viewController")
+        self.authenticationHandlerReady = true
 
-          rootViewController.present(viewController, animated: true) {
-            print("[ExpoGameCenter] Authentication view controller presented")
+        // If we have a promise waiting, present the viewController immediately
+        if let promise = self.authenticationPromise {
+          print("[ExpoGameCenter] Promise waiting, presenting auth UI now")
+          DispatchQueue.main.async {
+            guard let rootViewController = self.getRootViewController() else {
+              self.authenticationPromise = nil
+              print("[ExpoGameCenter] Could not find root view controller")
+              promise.resolve(false)
+              return
+            }
+
+            rootViewController.present(viewController, animated: true) {
+              print("[ExpoGameCenter] Authentication view controller presented")
+            }
           }
+        } else {
+          // No promise waiting yet - store the viewController for later
+          print("[ExpoGameCenter] No promise yet, storing viewController for later presentation")
+          self.storedAuthenticationViewController = viewController
         }
         return
       }
