@@ -1,6 +1,6 @@
 {
   "name": "expo-game-center",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A comprehensive Expo module for iOS Game Center integration, providing authentication, leaderboards, achievements, and native UI presentation.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
