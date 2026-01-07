@@ -18,7 +18,16 @@ const WrappedGameCenterModule = {
     isGameCenterAvailable: () => ExpoGameCenterModule_1.default.isGameCenterAvailable(),
     authenticateLocalPlayer: async () => {
         console.log('[ExpoGameCenter] 🚀 BUILD MARKER: This is the NEW fixed build from commit 8e3e9b7');
-        return ExpoGameCenterModule_1.default.authenticateLocalPlayer();
+        console.log('[ExpoGameCenter] Calling native authenticateLocalPlayer...');
+        try {
+            const result = await ExpoGameCenterModule_1.default.authenticateLocalPlayer();
+            console.log('[ExpoGameCenter] ✅ Promise resolved with:', result);
+            return result;
+        }
+        catch (error) {
+            console.log('[ExpoGameCenter] ❌ Promise rejected with error:', (error === null || error === void 0 ? void 0 : error.message) || error);
+            throw error;
+        }
     },
     getLocalPlayer: () => ExpoGameCenterModule_1.default.getLocalPlayer(),
     getPlayerImage: () => ExpoGameCenterModule_1.default.getPlayerImage(),

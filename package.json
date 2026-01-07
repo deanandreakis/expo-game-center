@@ -9,7 +9,6 @@
     "build:plugin": "cd plugin && tsc",
     "prepare": "npm run build",
     "clean": "rm -rf build && rm -rf plugin/build",
-    "prepare": "npm run build",
     "lint": "eslint src/ --ext .ts,.tsx,.js,.jsx",
     "lint:fix": "eslint src/ --ext .ts,.tsx,.js,.jsx --fix",
     "typecheck": "tsc --noEmit",
