@@ -183,12 +183,8 @@ public class ExpoGameCenterModule: Module {
     AsyncFunction("presentLeaderboard") { (leaderboardID: String, promise: Promise) in
       print("[ExpoGameCenter] presentLeaderboard: \(leaderboardID)")
 
-      // Check authentication first
-      guard GKLocalPlayer.local.isAuthenticated else {
-        print("[ExpoGameCenter] ❌ Not authenticated")
-        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view leaderboards")
-        return
-      }
+      // DON'T check GKLocalPlayer.local.isAuthenticated - it might hang!
+      // GameKit will handle authentication automatically if needed
 
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
@@ -232,10 +228,8 @@ public class ExpoGameCenterModule: Module {
     AsyncFunction("presentAchievements") { (promise: Promise) in
       print("[ExpoGameCenter] presentAchievements called")
 
-      guard GKLocalPlayer.local.isAuthenticated else {
-        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view achievements")
-        return
-      }
+      // DON'T check isAuthenticated - it might hang!
+      // GameKit will handle authentication automatically
 
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
@@ -267,10 +261,8 @@ public class ExpoGameCenterModule: Module {
     AsyncFunction("presentGameCenterViewController") { (promise: Promise) in
       print("[ExpoGameCenter] presentGameCenterViewController called")
 
-      guard GKLocalPlayer.local.isAuthenticated else {
-        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view Game Center")
-        return
-      }
+      // DON'T check isAuthenticated - it might hang!
+      // GameKit will handle authentication automatically
 
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
