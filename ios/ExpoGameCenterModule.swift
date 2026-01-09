@@ -3,135 +3,101 @@ import GameKit
 import Foundation
 import UIKit
 
-// Delegate class to handle GameCenter view controller events
-class GameCenterDelegate: NSObject, GKGameCenterControllerDelegate {
-  func gameCenterViewControllerDidFinish(_ gameCenterViewController: GKGameCenterViewController) {
-    gameCenterViewController.dismiss(animated: true, completion: nil)
-  }
-}
-
 public class ExpoGameCenterModule: Module {
-  private let gameCenterDelegate = GameCenterDelegate()
-  private var authenticationPromise: Promise?
-  private var hasSetupAuthHandler = false
+  // Promise storage for async UI operations
+  private var leaderboardPromise: Promise?
+  private var achievementsPromise: Promise?
+  private var gameCenterPromise: Promise?
 
-  // Cache authentication state to handle race condition
-  private var cachedAuthenticationState: Bool?
-  private var authenticationHandlerReady = false
-  private var storedAuthenticationViewController: UIViewController?
-  
   // Required for module registration
   public required init(appContext: AppContext) {
-    print("[ExpoGameCenter] *** Module class being initialized ***")
+    print("[ExpoGameCenter] *** Module initialized ***")
     super.init(appContext: appContext)
-    print("[ExpoGameCenter] *** Module initialized successfully ***")
-    
-    // Set up authentication handler once during module initialization
-    setupAuthenticationHandler()
+    // DON'T set up authentication handler here - it causes race conditions
+    // Handler will be set up on-demand when authenticateLocalPlayer() is called
   }
-  
+
   public func definition() -> ModuleDefinition {
     Name("ExpoGameCenter")
-    
+
     OnCreate {
       print("[ExpoGameCenter] *** Module definition created ***")
-      print("[ExpoGameCenter] *** GameKit available: true")
     }
 
     AsyncFunction("isGameCenterAvailable") { (promise: Promise) in
       print("[ExpoGameCenter] isGameCenterAvailable called")
-      // GameKit is always available on iOS, but GameCenter might be disabled
-      let isAvailable = true
-      print("[ExpoGameCenter] GameCenter availability: \(isAvailable)")
-      promise.resolve(isAvailable)
+      // GameKit is always available on iOS
+      promise.resolve(true)
     }
 
     AsyncFunction("authenticateLocalPlayer") { (promise: Promise) in
       print("[ExpoGameCenter] authenticateLocalPlayer called")
 
-      // CRITICAL: Always check REAL authentication state first
-      // The cached state might be stale - player could have logged in since handler fired
-      let currentAuthState = GKLocalPlayer.local.isAuthenticated
-      print("[ExpoGameCenter] Current authentication state: \(currentAuthState)")
-
-      if currentAuthState {
-        print("[ExpoGameCenter] Player is authenticated")
-        // Update cache to reflect current state
-        self.cachedAuthenticationState = true
-        self.authenticationHandlerReady = true
+      // Fast path: Check if already authenticated
+      if GKLocalPlayer.local.isAuthenticated {
+        print("[ExpoGameCenter] ✅ Player already authenticated")
         promise.resolve(true)
         return
       }
 
-      // Not currently authenticated - check if handler already fired
-      if self.authenticationHandlerReady {
-        print("[ExpoGameCenter] Handler already fired, player not authenticated")
+      print("[ExpoGameCenter] Setting up authentication handler NOW (on-demand)")
 
-        // Check if we have a stored authentication viewController to present
-        if let authViewController = self.storedAuthenticationViewController {
-          print("[ExpoGameCenter] Found stored auth viewController, presenting it now")
-          self.storedAuthenticationViewController = nil  // Clear it
-          self.authenticationPromise = promise  // Store promise to resolve after auth
+      // Set up handler RIGHT NOW when method is called (not at module init!)
+      // This avoids race conditions where handler fires before JS calls this method
+      GKLocalPlayer.local.authenticateHandler = { [weak self] viewController, error in
+        guard let self = self else {
+          print("[ExpoGameCenter] ❌ Module released during authentication")
+          promise.reject("MODULE_RELEASED", "Module was released during authentication")
+          return
+        }
+
+        // Handle error case
+        if let error = error {
+          print("[ExpoGameCenter] ❌ Authentication error: \(error.localizedDescription)")
+          promise.reject("AUTHENTICATION_ERROR", error.localizedDescription)
+          return
+        }
+
+        // If viewController provided, user needs to sign in
+        if let viewController = viewController {
+          print("[ExpoGameCenter] 📱 Presenting authentication UI")
 
           DispatchQueue.main.async {
-            guard let rootViewController = self.getRootViewController() else {
-              print("[ExpoGameCenter] No root view controller available")
-              promise.resolve(false)
+            guard let rootVC = self.getRootViewController() else {
+              print("[ExpoGameCenter] ❌ No root view controller available")
+              promise.reject("NO_ROOT_VC", "Could not find root view controller")
               return
             }
 
-            rootViewController.present(authViewController, animated: true) {
-              print("[ExpoGameCenter] Authentication view controller presented")
-              // The handler will be called again when user completes authentication
-            }
-          }
-
-          // Set timeout for user interaction
-          DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) {
-            if let pendingPromise = self.authenticationPromise {
-              self.authenticationPromise = nil
-              print("[ExpoGameCenter] Authentication UI timed out after 30 seconds")
-              let finalState = GKLocalPlayer.local.isAuthenticated
-              pendingPromise.resolve(finalState)
+            // Present the sign-in UI
+            rootVC.present(viewController, animated: true) {
+              print("[ExpoGameCenter] Authentication UI presented, waiting for completion...")
+              // Poll for authentication completion
+              self.pollForAuthenticationCompletion(promise: promise)
             }
           }
           return
         }
 
-        // No viewController to present, player just isn't authenticated
-        promise.resolve(false)
-        return
-      }
-
-      // Handler hasn't fired yet - wait for it
-      self.authenticationPromise = promise
-      print("[ExpoGameCenter] Waiting for authentication handler to fire...")
-
-      // Set a timeout for authentication
-      DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-        if let pendingPromise = self.authenticationPromise {
-          self.authenticationPromise = nil
-          print("[ExpoGameCenter] Authentication timed out after 10 seconds")
-          // Check one more time before timing out
-          let finalState = GKLocalPlayer.local.isAuthenticated
-          print("[ExpoGameCenter] Final auth state before timeout: \(finalState)")
-          pendingPromise.resolve(finalState)
-        }
+        // No viewController and no error = authentication complete
+        let isAuthenticated = GKLocalPlayer.local.isAuthenticated
+        print("[ExpoGameCenter] ✅ Authentication completed: \(isAuthenticated)")
+        promise.resolve(isAuthenticated)
       }
     }
-    
+
     AsyncFunction("getConstants") { (promise: Promise) in
       promise.resolve([
         "isGameCenterAvailable": true
       ])
     }
-    
+
     AsyncFunction("getLocalPlayer") { (promise: Promise) in
       guard GKLocalPlayer.local.isAuthenticated else {
         promise.resolve(nil)
         return
       }
-      
+
       let playerInfo = [
         "playerID": GKLocalPlayer.local.gamePlayerID,
         "displayName": GKLocalPlayer.local.displayName,
@@ -142,14 +108,13 @@ public class ExpoGameCenterModule: Module {
 
     AsyncFunction("getPlayerImage") { (promise: Promise) in
       print("[ExpoGameCenter] getPlayerImage called")
-      
+
       guard GKLocalPlayer.local.isAuthenticated else {
-        print("[ExpoGameCenter] Player not authenticated for image")
+        print("[ExpoGameCenter] Player not authenticated")
         promise.resolve(nil)
         return
       }
-      
-      print("[ExpoGameCenter] Loading player photo")
+
       GKLocalPlayer.local.loadPhoto(for: .small) { image, error in
         DispatchQueue.main.async {
           if let error = error {
@@ -157,92 +122,108 @@ public class ExpoGameCenterModule: Module {
             promise.resolve(nil)
             return
           }
-          
-          guard let image = image else {
-            print("[ExpoGameCenter] No image returned")
+
+          guard let image = image,
+                let imageData = image.pngData() else {
             promise.resolve(nil)
             return
           }
-          
-          guard let imageData = image.pngData() else {
-            print("[ExpoGameCenter] Failed to convert image to PNG data")
-            promise.resolve(nil)
-            return
-          }
-          
+
           let base64String = imageData.base64EncodedString()
-          print("[ExpoGameCenter] Image converted to base64")
           promise.resolve("data:image/png;base64,\(base64String)")
         }
       }
     }
 
     AsyncFunction("submitScore") { (score: Int, leaderboardID: String, promise: Promise) in
-      print("[ExpoGameCenter] submitScore called with score: \(score), leaderboard: \(leaderboardID)")
-      
+      print("[ExpoGameCenter] submitScore: \(score) to \(leaderboardID)")
+
       guard GKLocalPlayer.local.isAuthenticated else {
         promise.reject("NOT_AUTHENTICATED", "Player not authenticated")
         return
       }
-      
+
       let scoreReporter = GKScore(leaderboardIdentifier: leaderboardID)
       scoreReporter.value = Int64(score)
-      
+
       GKScore.report([scoreReporter]) { error in
         if let error = error {
+          print("[ExpoGameCenter] ❌ Score submit error: \(error.localizedDescription)")
           promise.reject("SCORE_SUBMIT_ERROR", error.localizedDescription)
         } else {
+          print("[ExpoGameCenter] ✅ Score submitted successfully")
           promise.resolve(true)
         }
       }
     }
 
     AsyncFunction("reportAchievement") { (achievementID: String, percentComplete: Double, promise: Promise) in
-      print("[ExpoGameCenter] reportAchievement called: \(achievementID) at \(percentComplete)%")
-      
+      print("[ExpoGameCenter] reportAchievement: \(achievementID) at \(percentComplete)%")
+
       guard GKLocalPlayer.local.isAuthenticated else {
         promise.reject("NOT_AUTHENTICATED", "Player not authenticated")
         return
       }
-      
+
       let achievement = GKAchievement(identifier: achievementID)
       achievement.percentComplete = percentComplete
       achievement.showsCompletionBanner = true
-      
+
       GKAchievement.report([achievement]) { error in
         if let error = error {
+          print("[ExpoGameCenter] ❌ Achievement report error: \(error.localizedDescription)")
           promise.reject("ACHIEVEMENT_REPORT_ERROR", error.localizedDescription)
         } else {
+          print("[ExpoGameCenter] ✅ Achievement reported successfully")
           promise.resolve(true)
         }
       }
     }
 
     AsyncFunction("presentLeaderboard") { (leaderboardID: String, promise: Promise) in
-      print("[ExpoGameCenter] presentLeaderboard called with ID: \(leaderboardID)")
-      
+      print("[ExpoGameCenter] presentLeaderboard: \(leaderboardID)")
+
+      // Check authentication first
+      guard GKLocalPlayer.local.isAuthenticated else {
+        print("[ExpoGameCenter] ❌ Not authenticated")
+        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view leaderboards")
+        return
+      }
+
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
-          promise.reject("PRESENTATION_ERROR", "Could not find root view controller")
+          print("[ExpoGameCenter] ❌ No root view controller")
+          promise.reject("NO_ROOT_VC", "Could not find root view controller")
           return
         }
-        
+
+        // Store promise to resolve when user dismisses the leaderboard
+        self.leaderboardPromise = promise
+
         if #available(iOS 14.0, *) {
-          let leaderboardViewController = GKGameCenterViewController(leaderboardID: leaderboardID, playerScope: .global, timeScope: .allTime)
-          leaderboardViewController.gameCenterDelegate = self.gameCenterDelegate
-          
-          rootViewController.present(leaderboardViewController, animated: true) {
-            promise.resolve(nil)
+          let leaderboardVC = GKGameCenterViewController(
+            leaderboardID: leaderboardID,
+            playerScope: .global,
+            timeScope: .allTime
+          )
+          leaderboardVC.gameCenterDelegate = self
+
+          print("[ExpoGameCenter] 📊 Presenting leaderboard...")
+          rootViewController.present(leaderboardVC, animated: true) {
+            print("[ExpoGameCenter] Leaderboard UI visible")
+            // Set timeout - if user doesn't dismiss within 5 minutes, something is wrong
+            self.scheduleLeaderboardTimeout()
           }
         } else {
           // Fallback for iOS 13
-          let leaderboardViewController = GKGameCenterViewController()
-          leaderboardViewController.gameCenterDelegate = self.gameCenterDelegate
-          leaderboardViewController.viewState = .leaderboards
-          leaderboardViewController.leaderboardIdentifier = leaderboardID
-          
-          rootViewController.present(leaderboardViewController, animated: true) {
-            promise.resolve(nil)
+          let leaderboardVC = GKGameCenterViewController()
+          leaderboardVC.gameCenterDelegate = self
+          leaderboardVC.viewState = .leaderboards
+          leaderboardVC.leaderboardIdentifier = leaderboardID
+
+          rootViewController.present(leaderboardVC, animated: true) {
+            print("[ExpoGameCenter] Leaderboard UI visible (iOS 13)")
+            self.scheduleLeaderboardTimeout()
           }
         }
       }
@@ -250,28 +231,34 @@ public class ExpoGameCenterModule: Module {
 
     AsyncFunction("presentAchievements") { (promise: Promise) in
       print("[ExpoGameCenter] presentAchievements called")
-      
+
+      guard GKLocalPlayer.local.isAuthenticated else {
+        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view achievements")
+        return
+      }
+
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
-          promise.reject("PRESENTATION_ERROR", "Could not find root view controller")
+          promise.reject("NO_ROOT_VC", "Could not find root view controller")
           return
         }
-        
+
+        self.achievementsPromise = promise
+
         if #available(iOS 14.0, *) {
-          let achievementViewController = GKGameCenterViewController(state: .achievements)
-          achievementViewController.gameCenterDelegate = self.gameCenterDelegate
-          
-          rootViewController.present(achievementViewController, animated: true) {
-            promise.resolve(nil)
+          let achievementVC = GKGameCenterViewController(state: .achievements)
+          achievementVC.gameCenterDelegate = self
+
+          rootViewController.present(achievementVC, animated: true) {
+            self.scheduleAchievementsTimeout()
           }
         } else {
-          // Fallback for iOS 13
-          let achievementViewController = GKGameCenterViewController()
-          achievementViewController.gameCenterDelegate = self.gameCenterDelegate
-          achievementViewController.viewState = .achievements
-          
-          rootViewController.present(achievementViewController, animated: true) {
-            promise.resolve(nil)
+          let achievementVC = GKGameCenterViewController()
+          achievementVC.gameCenterDelegate = self
+          achievementVC.viewState = .achievements
+
+          rootViewController.present(achievementVC, animated: true) {
+            self.scheduleAchievementsTimeout()
           }
         }
       }
@@ -279,104 +266,98 @@ public class ExpoGameCenterModule: Module {
 
     AsyncFunction("presentGameCenterViewController") { (promise: Promise) in
       print("[ExpoGameCenter] presentGameCenterViewController called")
-      
+
+      guard GKLocalPlayer.local.isAuthenticated else {
+        promise.reject("NOT_AUTHENTICATED", "Player must be authenticated to view Game Center")
+        return
+      }
+
       DispatchQueue.main.async {
         guard let rootViewController = self.getRootViewController() else {
-          promise.reject("PRESENTATION_ERROR", "Could not find root view controller")
+          promise.reject("NO_ROOT_VC", "Could not find root view controller")
           return
         }
-        
+
+        self.gameCenterPromise = promise
+
         if #available(iOS 14.0, *) {
-          let gameCenterViewController = GKGameCenterViewController(state: .default)
-          gameCenterViewController.gameCenterDelegate = self.gameCenterDelegate
-          
-          rootViewController.present(gameCenterViewController, animated: true) {
-            promise.resolve(nil)
+          let gameCenterVC = GKGameCenterViewController(state: .default)
+          gameCenterVC.gameCenterDelegate = self
+
+          rootViewController.present(gameCenterVC, animated: true) {
+            self.scheduleGameCenterTimeout()
           }
         } else {
-          // Fallback for iOS 13
-          let gameCenterViewController = GKGameCenterViewController()
-          gameCenterViewController.gameCenterDelegate = self.gameCenterDelegate
-          gameCenterViewController.viewState = .default
-          
-          rootViewController.present(gameCenterViewController, animated: true) {
-            promise.resolve(nil)
+          let gameCenterVC = GKGameCenterViewController()
+          gameCenterVC.gameCenterDelegate = self
+          gameCenterVC.viewState = .default
+
+          rootViewController.present(gameCenterVC, animated: true) {
+            self.scheduleGameCenterTimeout()
           }
         }
       }
     }
   }
-  
+
   // MARK: - Private Methods
-  
-  private func setupAuthenticationHandler() {
-    guard !hasSetupAuthHandler else { return }
-    hasSetupAuthHandler = true
-    
-    print("[ExpoGameCenter] Setting up authentication handler (once)")
-    
-    GKLocalPlayer.local.authenticateHandler = { [weak self] viewController, error in
-      guard let self = self else { return }
 
-      if let error = error {
-        print("[ExpoGameCenter] Authentication error: \(error.localizedDescription)")
+  /// Poll for authentication completion after UI is presented
+  private func pollForAuthenticationCompletion(promise: Promise) {
+    var attempts = 0
+    let maxAttempts = 60 // 30 seconds (0.5s interval)
 
-        // FIX: Cache the error state even if no promise is waiting
-        self.cachedAuthenticationState = false
-        self.authenticationHandlerReady = true
+    let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+      attempts += 1
 
-        if let promise = self.authenticationPromise {
-          self.authenticationPromise = nil
-          // CRITICAL: Resolve with false instead of rejecting
-          // This lets the app handle "not authenticated" gracefully
-          print("[ExpoGameCenter] Resolving promise with false due to auth error")
-          promise.resolve(false)
-        }
-        return
-      }
-
-      if let viewController = viewController {
-        print("[ExpoGameCenter] Authentication handler provided viewController")
-        self.authenticationHandlerReady = true
-
-        // If we have a promise waiting, present the viewController immediately
-        if let promise = self.authenticationPromise {
-          print("[ExpoGameCenter] Promise waiting, presenting auth UI now")
-          DispatchQueue.main.async {
-            guard let rootViewController = self.getRootViewController() else {
-              self.authenticationPromise = nil
-              print("[ExpoGameCenter] Could not find root view controller")
-              promise.resolve(false)
-              return
-            }
-
-            rootViewController.present(viewController, animated: true) {
-              print("[ExpoGameCenter] Authentication view controller presented")
-            }
-          }
-        } else {
-          // No promise waiting yet - store the viewController for later
-          print("[ExpoGameCenter] No promise yet, storing viewController for later presentation")
-          self.storedAuthenticationViewController = viewController
-        }
-        return
-      }
-
-      // Authentication completed (success or user cancelled)
       let isAuthenticated = GKLocalPlayer.local.isAuthenticated
-      print("[ExpoGameCenter] Authentication completed, result: \(isAuthenticated)")
 
-      // FIX: Cache the authentication state even if no promise is waiting
-      self.cachedAuthenticationState = isAuthenticated
-      self.authenticationHandlerReady = true
-
-      if let promise = self.authenticationPromise {
-        self.authenticationPromise = nil
-        promise.resolve(isAuthenticated)
+      if isAuthenticated {
+        // User successfully authenticated
+        print("[ExpoGameCenter] ✅ User authenticated successfully")
+        timer.invalidate()
+        promise.resolve(true)
+      } else if attempts >= maxAttempts {
+        // Timeout - user probably cancelled or closed the dialog
+        print("[ExpoGameCenter] ⏱️ Authentication timeout (user likely cancelled)")
+        timer.invalidate()
+        promise.resolve(false)
       }
     }
   }
-  
+
+  /// Schedule timeout for leaderboard presentation
+  private func scheduleLeaderboardTimeout() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 300.0) { // 5 minutes
+      if let promise = self.leaderboardPromise {
+        self.leaderboardPromise = nil
+        print("[ExpoGameCenter] ⏱️ Leaderboard timeout (should not happen)")
+        promise.resolve(nil)
+      }
+    }
+  }
+
+  /// Schedule timeout for achievements presentation
+  private func scheduleAchievementsTimeout() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 300.0) {
+      if let promise = self.achievementsPromise {
+        self.achievementsPromise = nil
+        promise.resolve(nil)
+      }
+    }
+  }
+
+  /// Schedule timeout for game center presentation
+  private func scheduleGameCenterTimeout() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 300.0) {
+      if let promise = self.gameCenterPromise {
+        self.gameCenterPromise = nil
+        promise.resolve(nil)
+      }
+    }
+  }
+
+  /// Get the root view controller for presenting modals
   private func getRootViewController() -> UIViewController? {
     // iOS 15+ preferred method
     if #available(iOS 15.0, *) {
@@ -385,13 +366,41 @@ public class ExpoGameCenterModule: Module {
         return window.rootViewController
       }
     }
-    
+
     // Fallback for older iOS versions
     if let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) {
       return window.rootViewController
     }
-    
+
     // Last resort fallback
     return UIApplication.shared.windows.first?.rootViewController
+  }
+}
+
+// MARK: - GKGameCenterControllerDelegate
+
+extension ExpoGameCenterModule: GKGameCenterControllerDelegate {
+  /// Called when user dismisses a GameCenter view controller
+  public func gameCenterViewControllerDidFinish(_ gameCenterViewController: GKGameCenterViewController) {
+    print("[ExpoGameCenter] User dismissed GameCenter view controller")
+
+    gameCenterViewController.dismiss(animated: true) {
+      print("[ExpoGameCenter] GameCenter view controller dismissed")
+
+      // Resolve the appropriate promise based on which view was shown
+      if let promise = self.leaderboardPromise {
+        self.leaderboardPromise = nil
+        print("[ExpoGameCenter] ✅ Resolving leaderboard promise")
+        promise.resolve(nil)
+      } else if let promise = self.achievementsPromise {
+        self.achievementsPromise = nil
+        promise.resolve(nil)
+      } else if let promise = self.gameCenterPromise {
+        self.gameCenterPromise = nil
+        promise.resolve(nil)
+      } else {
+        print("[ExpoGameCenter] ⚠️ No promise to resolve (unexpected)")
+      }
+    }
   }
 }
